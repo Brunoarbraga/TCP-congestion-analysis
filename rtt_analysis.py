@@ -1,13 +1,9 @@
-#!/usr/bin/python
-
-from __future__ import print_function
-
-import os
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 from mininet.node import OVSController
+from __future__ import print_function
 import time
 import re
 
@@ -147,7 +143,7 @@ if __name__ == '__main__':
     setLogLevel( 'info' )
     results = runTests()
 
-    # mudar para gerar CSV ao invés de txt
+    # todo - mudar para gerar CSV ao invés de txt
     with open('results.txt', 'w') as f:
         f.write(f"{'Algorithm':<12} {'Buffer':>8} {'h1 (Mbps)':>12} {'h2 (Mbps)':>12}\n")
         f.write("-" * 50 + "\n")
