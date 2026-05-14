@@ -6,23 +6,39 @@ import os
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.log import setLogLevel, info
-from mininet.cli import CLI
 from mininet.link import TCLink
 from mininet.node import OVSController
+import time
+import re
 
-# Mudar algoritmo de congestionamento 'bbr' ou 'cubic'
-TCP_ALGORITHM = 'cubic'
+
+# Parâmetros
+#===================================================================
+# tamanho do buffer do gargalo
+BUFFER_SIZES = [100, 50, 20, 10, 5, 1]
+TCP_ALGORITHMS = ['cubic', 'bbr']
+IPERF_DURATION = 30
+BOTTLENECK_BW = 10
+BOTTLENECK_DELAY = '5ms'
+H1_DELAY = '10ms'  # fluxo com menor RTT
+H2_DELAY = '50ms'  # fluxo com maior RTT
+#===================================================================
+
+
 
 class NetworkTopology( Topo ):
     # Constrói a topologia da rede
-    def build( self, **_opts ):
+    def build( self, buffer_size=100, **_opts ):
    
         # switchs
         s1 = self.addSwitch('s1')
         s2 = self.addSwitch('s2')
         
         # link gargalo
-        self.addLink(s1, s2, cls=TCLink, bw=10, delay='5ms', max_queue_size=10)
+        self.addLink(s1, s2, cls=TCLink, 
+                     bw=BOTTLENECK_BW, 
+                     delay=BOTTLENECK_DELAY, 
+                     max_queue_size=buffer_size)
 
         # hosts
         h1 = self.addHost('h1')
@@ -30,29 +46,110 @@ class NetworkTopology( Topo ):
         h3 = self.addHost('h3')
         
         # link com RTT 
-        self.addLink(h1, s1, cls=TCLink, delay='10ms')
-        self.addLink(h2, s1, cls=TCLink, delay='50ms')
+        self.addLink(h1, s1, cls=TCLink, delay=H1_DELAY)
+        self.addLink(h2, s1, cls=TCLink, delay=H2_DELAY)
         self.addLink(h3, s2)
+
 
 # muda o algoritmo TCP
 def setTcpAlgorith(net, tcp):
-    info(f'Changing TCP congestion algorithm to {tcp}\n')
     for host in net.hosts:
         host.cmd(f'sysctl -w net.ipv4.tcp_congestion_control={tcp}')
-        result = host.cmd('sysctl net.ipv4.tcp_congestion_control')
-        info(f'    {host.name}: {result.strip()}\n')
 
 
-def run():
 
-    topo = NetworkTopology()
-    net = Mininet( topo=topo, controller=OVSController, link=TCLink )
+def parse_iperf_throughput(output):
+    "Extrai o throughput da saída do cliente (h1 e h2)"
+    matches = re.findall(
+        r'([\d.]+)\s+(K|M|G)bits/sec',
+        output
+    )
+    if not matches:
+        return None
+    # Última linha de sumário (iperf -c imprime várias, a última é o total)
+    val, unit = matches[-1]
+    val = float(val)
+    if unit == 'K':
+        val /= 1000
+    elif unit == 'G':
+        val *= 1000
+    return round(val, 4)
 
+
+def runExperiment(buffer_size, tcp):
+
+    info (f'Buffer = {buffer_size} packets | TCP = {tcp}\n')
+
+    topo = NetworkTopology(buffer_size=buffer_size)
+    net = Mininet(topo=topo, controller=OVSController, link=TCLink)
     net.start()
-    setTcpAlgorith(net, TCP_ALGORITHM)
-    CLI( net )
+
+    setTcpAlgorith(net, tcp)
+
+    h1 = net.get('h1')
+    h2 = net.get('h2')
+    h3 = net.get('h3')
+
+    h3_ip = h3.IP()
+    info(f' H3 ip = {h3_ip}\n')
+    time.sleep(2)
+
+    # inicia servidor h3
+    h3.cmd('pkill ´f iperf 2>dev/null; sleep 0.5')
+    h3.cmd('iperf -s -D')
+    time.sleep(1)
+
+    # iperf de h1 e h2
+    info('Começando iperf de h1 e h2')
+    h1.cmd(f'iperf -c {h3_ip} -t {IPERF_DURATION} > /tmp/iperf_h1.txt 2>&1 &')
+    h2.cmd(f'iperf -c {h3_ip} -t {IPERF_DURATION} > /tmp/iperf_h2.txt 2>&1 &')
+    
+    # aguarda os processos terminarem
+    h1.cmd('wait')
+    h2.cmd('wait')
+
+
+    # coleta de resultado
+    out_h1 = h1.cmd('cat /tmp/iperf_h1.txt')
+    out_h2 = h2.cmd('cat /tmp/iperf_h2.txt')
+    tput_h1 = parse_iperf_throughput(out_h1)
+    tput_h2 = parse_iperf_throughput(out_h2)
+
+
+    info(f' Throughput h1: {tput_h1} Mbps\n')
+    info(f' Throughput h2: {tput_h2} Mbps\n')
+    # calcular unfairness aqui 
+
+    h3.cmd('pkill -f iperf 2>/dev/null')
     net.stop()
+
+    time.sleep(3) # pausa entre testes
+
+    return tput_h1, tput_h2
+
+def runTests():
+    results = []
+
+    for tcp_algorithm in TCP_ALGORITHMS:
+        for buffer in BUFFER_SIZES:
+            tput_h1, tput_h2 = runExperiment(buffer, tcp_algorithm)
+            results.append({
+                'tcp_algorithm' : tcp_algorithm,
+                'buffer_size' : buffer,
+                'throughput_h1(Mbps)' : tput_h1,
+                'throughput_h2(Mbps)' : tput_h2
+            })
+
+    return results
+
 
 if __name__ == '__main__':
     setLogLevel( 'info' )
-    run()
+    results = runTests()
+
+    # mudar para gerar CSV ao invés de txt
+    with open('results.txt', 'w') as f:
+        f.write(f"{'Algorithm':<12} {'Buffer':>8} {'h1 (Mbps)':>12} {'h2 (Mbps)':>12}\n")
+        f.write("-" * 50 + "\n")
+        for r in results:
+            f.write(f"{r['tcp_algorithm']:<12} {r['buffer_size']:>8} {str(r['throughput_h1(Mbps)']):>12} {str(r['throughput_h2(Mbps)']):>12}\n")
