@@ -1,11 +1,12 @@
+from __future__ import print_function
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 from mininet.node import OVSController
-from __future__ import print_function
 import time
 import re
+import csv
 
 
 # Parâmetros
@@ -16,8 +17,9 @@ TCP_ALGORITHMS = ['cubic', 'bbr']
 IPERF_DURATION = 30
 BOTTLENECK_BW = 10
 BOTTLENECK_DELAY = '5ms'
-H1_DELAY = '10ms'  # fluxo com menor RTT
-H2_DELAY = '50ms'  # fluxo com maior RTT
+H1_DELAY = '25ms'  # fluxo com menor RTT (simula acesso local)
+H2_DELAY = '150ms'  # fluxo com maior RTT (simula acesso remoto de outro país)
+IPERFS_PER_BUFFER_SIZE = 10
 #===================================================================
 
 
@@ -125,16 +127,44 @@ def runExperiment(buffer_size, tcp):
 
 def runTests():
     results = []
+    with open('results.csv', 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            'tcp_algorithm',
+            'buffer_size',
+            'avg_throughput_h1_mbps',
+            'avg_throughput_h2_mbps'
+        ])
 
-    for tcp_algorithm in TCP_ALGORITHMS:
-        for buffer in BUFFER_SIZES:
-            tput_h1, tput_h2 = runExperiment(buffer, tcp_algorithm)
-            results.append({
-                'tcp_algorithm' : tcp_algorithm,
-                'buffer_size' : buffer,
-                'throughput_h1(Mbps)' : tput_h1,
-                'throughput_h2(Mbps)' : tput_h2
-            })
+        for tcp_algorithm in TCP_ALGORITHMS:
+            for buffer in BUFFER_SIZES:
+
+                h1_vals = []
+                h2_vals = []
+
+                for iterations in range(IPERFS_PER_BUFFER_SIZE): 
+
+                    tput_h1, tput_h2 = runExperiment(buffer, tcp_algorithm)
+                    h1_vals.append(tput_h1)
+                    h2_vals.append(tput_h2)
+
+
+                avg_h1 = round((sum(h1_vals) / len(h1_vals)), 4)
+                avg_h2 = round((sum(h2_vals) / len(h2_vals)), 4)
+
+                writer.writerow([
+                    tcp_algorithm,
+                    buffer,
+                    avg_h1,
+                    avg_h2
+                ])
+
+                results.append({
+                    'tcp_algorithm' : tcp_algorithm,
+                    'buffer_size' : buffer,
+                    'throughput_h1(Mbps)' : avg_h1,
+                    'throughput_h2(Mbps)' : avg_h2
+                })
 
     return results
 
